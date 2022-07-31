@@ -21,25 +21,39 @@
 #define BUTTON_MT 12
 // left/right top/bottom buttons
 #define BUTTON_LB 3
-#define BUTTON_LT 4
+#define BUTTON_LT 6
 #define BUTTON_RB 5
-#define BUTTON_RT 6
+#define BUTTON_RT 4
 
-#define ACTION_NONE 0
-#define ACTION_INVALID -1
-#define ACTION_RESET 1
+enum ACTION {
+  NONE,
+  INVALID,
+  REPEAT_SINGLE_PRESS,
+  RESET,
+  VOLUME_UP,
+  VOLUME_DOWN,
+  PAUSE,
+  PAGE_DOWN,
+  PAGE_UP,
+  DOUBLE_PAGE_UP
+};
 
 struct BUTTON_STATE {
   const int pin;
   const int action;
+  const int longPressAction = NONE;
+  const bool canRepeat = false;
+  const int repeatThrottle = BUTTON_THROTTLE_MILLIS;
 };
 
-struct BUTTON_STATE buttonStates[] = {
-  {BUTTON_LB, MEDIA_KEY_VOLUME_DOWN},
-  {BUTTON_RB, MEDIA_KEY_VOLUME_UP},
-  {BUTTON_LT, KEYCODE_PAGE_DOWN},
-  {BUTTON_RT, KEYCODE_PAGE_UP},
-  {BUTTON_MT, ACTION_RESET},
+BUTTON_STATE buttonStates[] = {
+  {BUTTON_LB, VOLUME_DOWN, REPEAT_SINGLE_PRESS},
+  {BUTTON_RB, VOLUME_UP, REPEAT_SINGLE_PRESS},
+  //{BUTTON_LT, PAGE_UP},
+  //{BUTTON_RT, PAGE_DOWN},
+  {BUTTON_LT, PAUSE},
+  {BUTTON_RT, PAGE_DOWN, PAGE_UP, true, 1000},
+  {BUTTON_MT, INVALID, RESET}
 };
 
 // Debugging/test mode without buttons
@@ -60,7 +74,7 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_STATUS, OUTPUT);
   pinMode(LED_ACTION, OUTPUT);
-  for (int i = 0; i < sizeof(buttonStates) / sizeof(struct BUTTON_STATE); i++) {
+  for (unsigned int i = 0; i < sizeof(buttonStates) / sizeof(struct BUTTON_STATE); i++) {
     pinMode(buttonStates[i].pin, INPUT_PULLUP);
   }
 
@@ -77,6 +91,7 @@ void loop() {
   unsigned long now = millis();
   static unsigned long lastAction = 0;
   static bool lastPressed = false;
+  static bool lastLongPressed = false;
 
 #ifdef NOBUTTON_TEST
   // https://forum.arduino.cc/t/arduino-perform-task-only-once-every-second/240495/6
@@ -105,23 +120,39 @@ void loop() {
   analogWrite(LED_BUILTIN, kLedConnectedIntensity);
   analogWrite(LED_STATUS, LED_STATUS_BRIGHTNESS);
 
-  int action = ACTION_NONE;
+  int action = NONE;
   bool anyPressed = false;
   
-  for (int i = 0; i < sizeof(buttonStates) / sizeof(struct BUTTON_STATE); i++) {
+  for (unsigned int i = 0; i < sizeof(buttonStates) / sizeof(struct BUTTON_STATE); i++) {
     struct BUTTON_STATE buttonState = buttonStates[i];
     int currentState = digitalRead(buttonState.pin);
 
     if (currentState == BUTTON_PRESSED_STATE) {
       // Light LED while any is pressed
       anyPressed = true;
-      // Immediately execute action on first press, or require long press to repeat
-      if (!lastPressed || (now - lastAction) > BUTTON_THROTTLE_MILLIS) {
-        // Do action
-        if (action == ACTION_NONE) {
-          action = buttonState.action;
+      int thisAction = NONE;
+      if (!lastPressed) {
+        // Immediately execute action on first press
+        thisAction = buttonState.action;
+        lastLongPressed = false;
+      } else if ((now - lastAction) > buttonState.repeatThrottle) {
+        // Long press action
+        if (buttonState.longPressAction == REPEAT_SINGLE_PRESS) {
+          thisAction = buttonState.action;
+        } else if (!lastLongPressed && buttonState.longPressAction != NONE) {
+          thisAction = buttonState.longPressAction;
+          // We only want to do long press action once
+          if (!buttonState.canRepeat) {
+            lastLongPressed = true;
+          }
+        }
+      }
+      if (thisAction != NONE) {
+        // Ensure we don't do any action when pressing multiple buttons
+        if (action == NONE) {
+          action = thisAction;
         } else {
-          action = ACTION_INVALID;
+          action = INVALID;
         }
         lastAction = now;
       }
@@ -135,23 +166,48 @@ void loop() {
 
 #ifndef NOBUTTON_TEST
 
-  if (action == ACTION_NONE || action == ACTION_INVALID) {
-    return;
+  int media_key = 0;
+  int key = 0;
+  int keyCount = 1;
+  switch (action) {
+    case VOLUME_DOWN:
+      media_key = MEDIA_KEY_VOLUME_DOWN;
+      break;
+    case VOLUME_UP:
+      media_key = MEDIA_KEY_VOLUME_UP;
+      break;
+    case PAUSE:
+      media_key = MEDIA_KEY_PLAY_PAUSE;
+      break;
+    case PAGE_DOWN:
+      key = KEYCODE_PAGE_DOWN;
+      break;
+    case PAGE_UP:
+      key = KEYCODE_PAGE_UP;
+      break;
+    case DOUBLE_PAGE_UP:
+      key = KEYCODE_PAGE_UP;
+      keyCount = 2;
+      break;
+    case RESET:
+      NVIC_SystemReset();
+      break;
   }
-
-  if (action == MEDIA_KEY_VOLUME_UP || action == MEDIA_KEY_VOLUME_DOWN) {
-    kb->media_keydown(action);
-    kb->SendReport();
-    kb->keyup();
-    kb->SendReport();
-  } else if (action == ACTION_RESET) {
-    // TODO implement me
-  } else {
-    // TODO fix me
-    kb->keydown(KeySym_t(action));
-    kb->SendReport();
-    kb->keyup();
-    kb->SendReport();
+  if (media_key || key) {
+    while (keyCount > 0) {
+      if (media_key) {
+        kb->media_keydown(media_key);
+      }
+      if (key) {
+        KeySym_t keySym = KeySym_t(0);
+        keySym.usage = key;
+        kb->keydown(keySym);
+      }
+      kb->SendReport();
+      kb->keyup();
+      kb->SendReport();
+      keyCount--;
+    }
   }
 
 #else
